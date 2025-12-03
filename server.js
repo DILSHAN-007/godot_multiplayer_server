@@ -76,6 +76,9 @@ function handleMessage(ws, msg) {
         case 'maze_sync':
             broadcastMaze(ws, msg);
             break;
+        case 'request_maze':
+            sendMazeToPlayer(ws);
+            break;
         case 'leave_room':
             leaveRoom(ws);
             break;
@@ -164,16 +167,19 @@ function joinRoom(ws, msg) {
         type: 'join_success',
         roomCode: roomCode,
         playerId: playerId,
-        allPlayers: room.playerData
+        allPlayers: room.playerData,
+        hasMaze: room.mazeData !== null
     }));
     
-    // Send maze data to new joiner if available
+    // Send maze data immediately if available
     if (room.mazeData) {
-        ws.send(JSON.stringify({
-            type: 'maze_sync',
-            mazeData: room.mazeData
-        }));
-        console.log(`🗺️ Sent maze data to ${msg.playerInfo.nick}`);
+        setTimeout(() => {
+            ws.send(JSON.stringify({
+                type: 'maze_sync',
+                mazeData: room.mazeData
+            }));
+            console.log(`🗺️ Sent maze data to ${msg.playerInfo.nick} (on join)`);
+        }, 100);
     }
     
     const newPlayerMsg = JSON.stringify({
@@ -190,6 +196,24 @@ function joinRoom(ws, msg) {
     });
     
     console.log(`✅ Player ${msg.playerInfo.nick} joined room ${roomCode}`);
+}
+
+function sendMazeToPlayer(ws) {
+    const room = rooms.get(ws.roomCode);
+    if (!room) {
+        console.log('❌ Room not found for maze request');
+        return;
+    }
+    
+    if (room.mazeData) {
+        ws.send(JSON.stringify({
+            type: 'maze_sync',
+            mazeData: room.mazeData
+        }));
+        console.log(`🗺️ Sent maze data to ${ws.playerInfo.nick} (on request)`);
+    } else {
+        console.log(`⚠️ No maze data available yet for room ${ws.roomCode}`);
+    }
 }
 
 function broadcastPosition(ws, msg) {
@@ -280,7 +304,8 @@ function broadcastMaze(ws, msg) {
         }
     });
     
-    console.log(`🗺️ Maze broadcasted to ${room.clients.length} clients in room ${ws.roomCode}`);
+    console.log(`🗺️ Maze data stored and broadcasted to ${room.clients.length} clients in room ${ws.roomCode}`);
+    console.log(`📊 Maze size: ${msg.mazeData ? msg.mazeData.length : 0} rows`);
 }
 
 function leaveRoom(ws) {
@@ -375,7 +400,8 @@ app.get('/stats', (req, res) => {
             code,
             host: room.hostInfo.nick,
             players: room.clients.length + 1,
-            hasMaze: room.mazeData !== null
+            hasMaze: room.mazeData !== null,
+            mazeSize: room.mazeData ? room.mazeData.length : 0
         }))
     });
 });

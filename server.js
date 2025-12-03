@@ -1,24 +1,24 @@
-// Complete WebSocket Server for Godot Multiplayer
 const WebSocket = require('ws');
 const express = require('express');
 const app = express();
-const HTTP_PORT = 8080;
-const WS_PORT = 9001;
 
-// Store rooms: roomCode -> { host, clients: [], hostInfo, gameState }
+const PORT = process.env.PORT || 10000;
+
+// Create HTTP server
+const server = require('http').createServer(app);
+
+// WebSocket on same server
+const wss = new WebSocket.Server({ server });
+
 const rooms = new Map();
 
-// WebSocket Server
-const wss = new WebSocket.Server({ port: WS_PORT });
-
 console.log('=================================');
-console.log('Godot Multiplayer Server Started');
-console.log(`HTTP: http://localhost:${HTTP_PORT}`);
-console.log(`WebSocket: ws://localhost:${WS_PORT}`);
+console.log('Godot Multiplayer Server Starting');
+console.log(`Port: ${PORT}`);
 console.log('=================================');
 
 wss.on('connection', (ws) => {
-    console.log('✅ New client connected');
+    console.log('✅ Client connected');
     ws.isAlive = true;
     
     ws.on('pong', () => {
@@ -30,8 +30,7 @@ wss.on('connection', (ws) => {
             const msg = JSON.parse(data.toString());
             handleMessage(ws, msg);
         } catch (e) {
-            console.error('❌ Message parse error:', e);
-            ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
+            console.error('❌ Parse error:', e);
         }
     });
     
@@ -45,7 +44,6 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Heartbeat - check for dead connections
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) {
@@ -55,14 +53,14 @@ const interval = setInterval(() => {
         ws.isAlive = false;
         ws.ping();
     });
-}, 30000); // 30 seconds
+}, 30000);
 
 wss.on('close', () => {
     clearInterval(interval);
 });
 
 function handleMessage(ws, msg) {
-    console.log(`📨 Received: ${msg.type} from ${msg.playerInfo?.nick || 'Unknown'}`);
+    console.log(`📨 ${msg.type}`);
     
     switch(msg.type) {
         case 'create_room':
@@ -77,14 +75,9 @@ function handleMessage(ws, msg) {
         case 'chat_message':
             broadcastChat(ws, msg);
             break;
-        case 'player_action':
-            broadcastAction(ws, msg);
-            break;
         case 'leave_room':
             leaveRoom(ws);
             break;
-        default:
-            console.log(`⚠️ Unknown message type: ${msg.type}`);
     }
 }
 
@@ -99,8 +92,6 @@ function generateRoomCode() {
 
 function createRoom(ws, msg) {
     let roomCode = generateRoomCode();
-    
-    // Ensure unique code
     while (rooms.has(roomCode)) {
         roomCode = generateRoomCode();
     }
@@ -131,7 +122,7 @@ function createRoom(ws, msg) {
         playerId: 'host'
     }));
     
-    console.log(`🎮 Room created: ${roomCode} by ${msg.playerInfo.nick}`);
+    console.log(`🎮 Room created: ${roomCode}`);
 }
 
 function joinRoom(ws, msg) {
@@ -143,16 +134,15 @@ function joinRoom(ws, msg) {
             type: 'join_failed',
             error: 'Room not found'
         }));
-        console.log(`❌ Join failed: Room ${roomCode} not found`);
+        console.log(`❌ Room not found: ${roomCode}`);
         return;
     }
     
     if (room.clients.length >= 9) {
         ws.send(JSON.stringify({
             type: 'join_failed',
-            error: 'Room is full (max 10 players)'
+            error: 'Room full (max 10 players)'
         }));
-        console.log(`❌ Join failed: Room ${roomCode} is full`);
         return;
     }
     
@@ -168,7 +158,6 @@ function joinRoom(ws, msg) {
         position: { x: 0, y: 0, z: 0 }
     };
     
-    // Send success to joining client with all player data
     ws.send(JSON.stringify({
         type: 'join_success',
         roomCode: roomCode,
@@ -176,7 +165,6 @@ function joinRoom(ws, msg) {
         allPlayers: room.playerData
     }));
     
-    // Notify host and all other clients about new player
     const newPlayerMsg = JSON.stringify({
         type: 'player_joined',
         playerId: playerId,
@@ -190,14 +178,13 @@ function joinRoom(ws, msg) {
         }
     });
     
-    console.log(`✅ Player ${msg.playerInfo.nick} joined room ${roomCode} as ${playerId}`);
+    console.log(`✅ Player ${msg.playerInfo.nick} joined room ${roomCode}`);
 }
 
 function broadcastPosition(ws, msg) {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
     
-    // Update stored position
     if (room.playerData[ws.playerId]) {
         room.playerData[ws.playerId].position = msg.position;
     }
@@ -208,7 +195,6 @@ function broadcastPosition(ws, msg) {
         position: msg.position
     });
     
-    // Broadcast to all other players in room
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -238,7 +224,6 @@ function broadcastChat(ws, msg) {
         playerId: ws.playerId
     });
     
-    // Broadcast to all players including sender
     ws.send(chatMsg);
     
     if (ws.isHost) {
@@ -257,38 +242,6 @@ function broadcastChat(ws, msg) {
             }
         });
     }
-    
-    console.log(`💬 Chat from ${ws.playerInfo.nick}: ${msg.message}`);
-}
-
-function broadcastAction(ws, msg) {
-    const room = rooms.get(ws.roomCode);
-    if (!room) return;
-    
-    const actionMsg = JSON.stringify({
-        type: 'player_action',
-        playerId: ws.playerId,
-        action: msg.action,
-        data: msg.data
-    });
-    
-    // Broadcast to all other players
-    if (ws.isHost) {
-        room.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(actionMsg);
-            }
-        });
-    } else {
-        if (room.host.readyState === WebSocket.OPEN) {
-            room.host.send(actionMsg);
-        }
-        room.clients.forEach(client => {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
-                client.send(actionMsg);
-            }
-        });
-    }
 }
 
 function leaveRoom(ws) {
@@ -302,10 +255,9 @@ function handleDisconnect(ws) {
     if (!room) return;
     
     if (ws.isHost) {
-        // Host left - notify all clients and close room
         const closeMsg = JSON.stringify({
             type: 'host_disconnected',
-            message: 'Host left the game'
+            message: 'Host left'
         });
         
         room.clients.forEach(client => {
@@ -316,9 +268,8 @@ function handleDisconnect(ws) {
         });
         
         rooms.delete(ws.roomCode);
-        console.log(`🚪 Room ${ws.roomCode} closed - Host disconnected`);
+        console.log(`🚪 Room ${ws.roomCode} closed`);
     } else {
-        // Client left - remove from room and notify others
         const index = room.clients.indexOf(ws);
         if (index > -1) {
             room.clients.splice(index, 1);
@@ -339,49 +290,46 @@ function handleDisconnect(ws) {
                     client.send(leftMsg);
                 }
             });
-            
-            console.log(`👋 Player ${ws.playerInfo?.nick || 'Unknown'} left room ${ws.roomCode}`);
         }
     }
 }
 
-// HTTP Server for status
+// HTTP Routes
 app.get('/', (req, res) => {
     res.send(`
         <html>
-            <head>
-                <title>Godot Multiplayer Server</title>
-                <style>
-                    body { font-family: Arial; padding: 20px; background: #1a1a1a; color: #fff; }
-                    .status { background: #2a2a2a; padding: 20px; border-radius: 10px; }
-                    .room { background: #3a3a3a; margin: 10px 0; padding: 15px; border-radius: 5px; }
-                </style>
-            </head>
-            <body>
+        <head>
+            <title>Godot Server</title>
+            <style>
+                body { 
+                    font-family: Arial; 
+                    padding: 20px; 
+                    background: #1a1a1a; 
+                    color: #fff; 
+                }
+                .status { 
+                    background: #2a2a2a; 
+                    padding: 20px; 
+                    border-radius: 10px; 
+                }
+            </style>
+        </head>
+        <body>
+            <div class="status">
                 <h1>🎮 Godot Multiplayer Server</h1>
-                <div class="status">
-                    <h2>Server Status: ✅ Online</h2>
-                    <p>Active Rooms: ${rooms.size}</p>
-                    <p>Connected Clients: ${wss.clients.size}</p>
-                    <p>WebSocket Port: ${WS_PORT}</p>
-                    <p>HTTP Port: ${HTTP_PORT}</p>
-                    
-                    <h3>Active Rooms:</h3>
-                    ${Array.from(rooms.entries()).map(([code, room]) => `
-                        <div class="room">
-                            <strong>Room: ${code}</strong><br>
-                            Host: ${room.hostInfo.nick}<br>
-                            Players: ${room.clients.length + 1}/10
-                        </div>
-                    `).join('') || '<p>No active rooms</p>'}
-                </div>
-            </body>
+                <h2>✅ Server Online</h2>
+                <p><strong>Active Rooms:</strong> ${rooms.size}</p>
+                <p><strong>Connected Clients:</strong> ${wss.clients.size}</p>
+                <p><strong>WebSocket URL:</strong> wss://${req.get('host')}</p>
+            </div>
+        </body>
         </html>
     `);
 });
 
 app.get('/stats', (req, res) => {
     res.json({
+        status: 'online',
         activeRooms: rooms.size,
         connectedClients: wss.clients.size,
         rooms: Array.from(rooms.entries()).map(([code, room]) => ({
@@ -392,6 +340,12 @@ app.get('/stats', (req, res) => {
     });
 });
 
-app.listen(HTTP_PORT, () => {
-    console.log(`📊 Stats available at: http://localhost:${HTTP_PORT}`);
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
+});
+
+// Start server
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`WebSocket: wss://your-domain:${PORT}`);
 });

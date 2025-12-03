@@ -4,10 +4,8 @@ const app = express();
 
 const PORT = process.env.PORT || 10000;
 
-// Create HTTP server
 const server = require('http').createServer(app);
 
-// WebSocket on same server
 const wss = new WebSocket.Server({ server });
 
 const rooms = new Map();
@@ -75,6 +73,9 @@ function handleMessage(ws, msg) {
         case 'chat_message':
             broadcastChat(ws, msg);
             break;
+        case 'maze_sync':
+            broadcastMaze(ws, msg);
+            break;
         case 'leave_room':
             leaveRoom(ws);
             break;
@@ -106,6 +107,7 @@ function createRoom(ws, msg) {
                 position: { x: 0, y: 0, z: 0 }
             }
         },
+        mazeData: null,
         createdAt: Date.now()
     };
     
@@ -164,6 +166,15 @@ function joinRoom(ws, msg) {
         playerId: playerId,
         allPlayers: room.playerData
     }));
+    
+    // Send maze data to new joiner if available
+    if (room.mazeData) {
+        ws.send(JSON.stringify({
+            type: 'maze_sync',
+            mazeData: room.mazeData
+        }));
+        console.log(`🗺️ Sent maze data to ${msg.playerInfo.nick}`);
+    }
     
     const newPlayerMsg = JSON.stringify({
         type: 'player_joined',
@@ -242,6 +253,34 @@ function broadcastChat(ws, msg) {
             }
         });
     }
+}
+
+function broadcastMaze(ws, msg) {
+    const room = rooms.get(ws.roomCode);
+    if (!room) return;
+    
+    // Only host can send maze data
+    if (!ws.isHost) {
+        console.log('⚠️ Non-host tried to send maze data');
+        return;
+    }
+    
+    // Store maze data in room
+    room.mazeData = msg.mazeData;
+    
+    const mazeMsg = JSON.stringify({
+        type: 'maze_sync',
+        mazeData: msg.mazeData
+    });
+    
+    // Broadcast to all clients
+    room.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(mazeMsg);
+        }
+    });
+    
+    console.log(`🗺️ Maze broadcasted to ${room.clients.length} clients in room ${ws.roomCode}`);
 }
 
 function leaveRoom(ws) {
@@ -335,7 +374,8 @@ app.get('/stats', (req, res) => {
         rooms: Array.from(rooms.entries()).map(([code, room]) => ({
             code,
             host: room.hostInfo.nick,
-            players: room.clients.length + 1
+            players: room.clients.length + 1,
+            hasMaze: room.mazeData !== null
         }))
     });
 });
@@ -344,7 +384,6 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok' });
 });
 
-// Start server
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`WebSocket: wss://your-domain:${PORT}`);

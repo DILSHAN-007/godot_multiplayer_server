@@ -4,10 +4,7 @@ const app = express();
 
 const PORT = process.env.PORT || 10000;
 
-// Create HTTP server
 const server = require('http').createServer(app);
-
-// WebSocket on same server
 const wss = new WebSocket.Server({ server });
 
 const rooms = new Map();
@@ -75,6 +72,9 @@ function handleMessage(ws, msg) {
         case 'chat_message':
             broadcastChat(ws, msg);
             break;
+        case 'maze_data':
+            broadcastMazeData(ws, msg);
+            break;
         case 'leave_room':
             leaveRoom(ws);
             break;
@@ -106,6 +106,7 @@ function createRoom(ws, msg) {
                 position: { x: 0, y: 0, z: 0 }
             }
         },
+        mazeData: null,  // Store maze data
         createdAt: Date.now()
     };
     
@@ -165,6 +166,15 @@ function joinRoom(ws, msg) {
         allPlayers: room.playerData
     }));
     
+    // If maze already generated, send to new player
+    if (room.mazeData) {
+        console.log(`📤 Sending existing maze data to ${playerId}`);
+        ws.send(JSON.stringify({
+            type: 'maze_data',
+            mazeData: room.mazeData
+        }));
+    }
+    
     const newPlayerMsg = JSON.stringify({
         type: 'player_joined',
         playerId: playerId,
@@ -212,6 +222,34 @@ function broadcastPosition(ws, msg) {
             }
         });
     }
+}
+
+function broadcastMazeData(ws, msg) {
+    const room = rooms.get(ws.roomCode);
+    if (!room) return;
+    
+    // Only host can send maze data
+    if (!ws.isHost) {
+        console.log(`⚠️ Non-host tried to send maze data`);
+        return;
+    }
+    
+    // Store maze data in room
+    room.mazeData = msg.mazeData;
+    
+    const mazeMsg = JSON.stringify({
+        type: 'maze_data',
+        mazeData: msg.mazeData
+    });
+    
+    console.log(`🎲 Broadcasting maze data to ${room.clients.length} clients`);
+    
+    // Send to all clients
+    room.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(mazeMsg);
+        }
+    });
 }
 
 function broadcastChat(ws, msg) {
@@ -303,7 +341,7 @@ app.get('/', (req, res) => {
     res.send(`
         <html>
         <head>
-            <title>Godot Server</title>
+            <title>Godot Maze Server</title>
             <style>
                 body { 
                     font-family: Arial; 
@@ -320,11 +358,12 @@ app.get('/', (req, res) => {
         </head>
         <body>
             <div class="status">
-                <h1>🎮 Godot Multiplayer Server</h1>
+                <h1>🎮 Godot Maze Multiplayer Server</h1>
                 <h2>✅ Server Online</h2>
                 <p><strong>Active Rooms:</strong> ${rooms.size}</p>
                 <p><strong>Connected Clients:</strong> ${wss.clients.size}</p>
                 <p><strong>Max Players Per Room:</strong> 6</p>
+                <p><strong>Features:</strong> Random Maze Generation, Co-op Puzzles</p>
                 <p><strong>WebSocket URL:</strong> wss://${req.get('host')}</p>
             </div>
         </body>
@@ -341,7 +380,8 @@ app.get('/stats', (req, res) => {
             code,
             host: room.hostInfo.nick,
             players: room.clients.length + 1,
-            maxPlayers: 6
+            maxPlayers: 6,
+            hasMaze: room.mazeData !== null
         }))
     });
 });
@@ -350,9 +390,9 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok' });
 });
 
-// Start server
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`WebSocket: wss://your-domain:${PORT}`);
     console.log(`Max players per room: 6`);
+    console.log(`Features: Procedural maze generation with sync`);
 });

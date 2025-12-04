@@ -138,10 +138,10 @@ function joinRoom(ws, msg) {
         return;
     }
     
-    if (room.clients.length >= 9) {
+    if (room.clients.length >= 5) {
         ws.send(JSON.stringify({
             type: 'join_failed',
-            error: 'Room full (max 10 players)'
+            error: 'Room full (max 6 players)'
         }));
         return;
     }
@@ -178,7 +178,8 @@ function joinRoom(ws, msg) {
         }
     });
     
-    console.log(`✅ Player ${msg.playerInfo.nick} joined room ${roomCode}`);
+    console.log(`✅ Player ${msg.playerInfo.nick} joined room ${roomCode} as ${playerId}`);
+    console.log(`   Total players in room: ${room.clients.length + 1}`);
 }
 
 function broadcastPosition(ws, msg) {
@@ -268,7 +269,7 @@ function handleDisconnect(ws) {
         });
         
         rooms.delete(ws.roomCode);
-        console.log(`🚪 Room ${ws.roomCode} closed`);
+        console.log(`🚪 Room ${ws.roomCode} closed (host left)`);
     } else {
         const index = room.clients.indexOf(ws);
         if (index > -1) {
@@ -290,6 +291,9 @@ function handleDisconnect(ws) {
                     client.send(leftMsg);
                 }
             });
+            
+            console.log(`👋 Player ${ws.playerInfo.nick} left room ${ws.roomCode}`);
+            console.log(`   Remaining players: ${room.clients.length + 1}`);
         }
     }
 }
@@ -320,6 +324,7 @@ app.get('/', (req, res) => {
                 <h2>✅ Server Online</h2>
                 <p><strong>Active Rooms:</strong> ${rooms.size}</p>
                 <p><strong>Connected Clients:</strong> ${wss.clients.size}</p>
+                <p><strong>Max Players Per Room:</strong> 6</p>
                 <p><strong>WebSocket URL:</strong> wss://${req.get('host')}</p>
             </div>
         </body>
@@ -335,7 +340,8 @@ app.get('/stats', (req, res) => {
         rooms: Array.from(rooms.entries()).map(([code, room]) => ({
             code,
             host: room.hostInfo.nick,
-            players: room.clients.length + 1
+            players: room.clients.length + 1,
+            maxPlayers: 6
         }))
     });
 });
@@ -348,4 +354,5 @@ app.get('/health', (req, res) => {
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`WebSocket: wss://your-domain:${PORT}`);
+    console.log(`Max players per room: 6`);
 });

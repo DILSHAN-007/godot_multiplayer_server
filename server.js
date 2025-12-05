@@ -1,47 +1,22 @@
 const WebSocket = require('ws');
 const express = require('express');
 const app = express();
-
 const PORT = process.env.PORT || 10000;
-
-// Create HTTP server
 const server = require('http').createServer(app);
-
-// WebSocket on same server
 const wss = new WebSocket.Server({ server });
-
 const rooms = new Map();
 
-console.log('=================================');
-console.log('Godot Multiplayer Server Starting');
-console.log(`Port: ${PORT}`);
-console.log('=================================');
-
 wss.on('connection', (ws) => {
-    console.log('✅ Client connected');
     ws.isAlive = true;
-    
-    ws.on('pong', () => {
-        ws.isAlive = true;
-    });
-    
+    ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', (data) => {
         try {
-            const msg = JSON.parse(data.toString());
-            handleMessage(ws, msg);
+            handleMessage(ws, JSON.parse(data.toString()));
         } catch (e) {
-            console.error('❌ Parse error:', e);
+            console.error('Parse error:', e);
         }
     });
-    
-    ws.on('close', () => {
-        console.log('❌ Client disconnected');
-        handleDisconnect(ws);
-    });
-    
-    ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-    });
+    ws.on('close', () => handleDisconnect(ws));
 });
 
 const interval = setInterval(() => {
@@ -55,29 +30,18 @@ const interval = setInterval(() => {
     });
 }, 30000);
 
-wss.on('close', () => {
-    clearInterval(interval);
-});
+wss.on('close', () => clearInterval(interval));
 
 function handleMessage(ws, msg) {
-    console.log(`📨 ${msg.type}`);
-    
     switch(msg.type) {
-        case 'create_room':
-            createRoom(ws, msg);
-            break;
-        case 'join_room':
-            joinRoom(ws, msg);
-            break;
-        case 'player_position':
-            broadcastPosition(ws, msg);
-            break;
-        case 'chat_message':
-            broadcastChat(ws, msg);
-            break;
-        case 'leave_room':
-            leaveRoom(ws);
-            break;
+        case 'create_room': createRoom(ws, msg); break;
+        case 'join_room': joinRoom(ws, msg); break;
+        case 'player_position': broadcastPosition(ws, msg); break;
+        case 'chat_message': broadcastChat(ws, msg); break;
+        case 'environment_update': broadcastEnvironment(ws, msg); break;
+        case 'puzzle_update': broadcastPuzzle(ws, msg); break;
+        case 'interaction': broadcastInteraction(ws, msg); break;
+        case 'leave_room': leaveRoom(ws); break;
     }
 }
 
@@ -106,6 +70,8 @@ function createRoom(ws, msg) {
                 position: { x: 0, y: 0, z: 0 }
             }
         },
+        environmentState: {},
+        puzzleStates: {},
         createdAt: Date.now()
     };
     
@@ -121,8 +87,6 @@ function createRoom(ws, msg) {
         success: true,
         playerId: 'host'
     }));
-    
-    console.log(`🎮 Room created: ${roomCode}`);
 }
 
 function joinRoom(ws, msg) {
@@ -130,19 +94,12 @@ function joinRoom(ws, msg) {
     const room = rooms.get(roomCode);
     
     if (!room) {
-        ws.send(JSON.stringify({
-            type: 'join_failed',
-            error: 'Room not found'
-        }));
-        console.log(`❌ Room not found: ${roomCode}`);
+        ws.send(JSON.stringify({ type: 'join_failed', error: 'Room not found' }));
         return;
     }
     
     if (room.clients.length >= 5) {
-        ws.send(JSON.stringify({
-            type: 'join_failed',
-            error: 'Room full (max 6 players)'
-        }));
+        ws.send(JSON.stringify({ type: 'join_failed', error: 'Room full (max 6 players)' }));
         return;
     }
     
@@ -165,6 +122,23 @@ function joinRoom(ws, msg) {
         allPlayers: room.playerData
     }));
     
+    // Send current environment state
+    if (Object.keys(room.environmentState).length > 0) {
+        ws.send(JSON.stringify({
+            type: 'environment_update',
+            data: room.environmentState
+        }));
+    }
+    
+    // Send all puzzle states
+    for (const [puzzleId, state] of Object.entries(room.puzzleStates)) {
+        ws.send(JSON.stringify({
+            type: 'puzzle_update',
+            puzzleId: puzzleId,
+            state: state
+        }));
+    }
+    
     const newPlayerMsg = JSON.stringify({
         type: 'player_joined',
         playerId: playerId,
@@ -177,9 +151,6 @@ function joinRoom(ws, msg) {
             client.send(newPlayerMsg);
         }
     });
-    
-    console.log(`✅ Player ${msg.playerInfo.nick} joined room ${roomCode} as ${playerId}`);
-    console.log(`   Total players in room: ${room.clients.length + 1}`);
 }
 
 function broadcastPosition(ws, msg) {
@@ -245,114 +216,126 @@ function broadcastChat(ws, msg) {
     }
 }
 
+function broadcastEnvironment(ws, msg) {
+    const room = rooms.get(ws.roomCode);
+    if (!room || !ws.isHost) return;
+    
+    room.environmentState = msg.data;
+    
+    const envMsg = JSON.stringify({
+        type: 'environment_update',
+        data: msg.data
+    });
+    
+    room.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(envMsg);
+        }
+    });
+}
+
+function broadcastPuzzle(ws, msg) {
+    const room = rooms.get(ws.roomCode);
+    if (!room) return;
+    
+    room.puzzleStates[msg.puzzleId] = msg.state;
+    
+    const puzzleMsg = JSON.stringify({
+        type: 'puzzle_update',
+        puzzleId: msg.puzzleId,
+        state: msg.state
+    });
+    
+    if (ws.isHost) {
+        room.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(puzzleMsg);
+            }
+        });
+    } else {
+        if (room.host.readyState === WebSocket.OPEN) {
+            room.host.send(puzzleMsg);
+        }
+        room.clients.forEach(client => {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+                client.send(puzzleMsg);
+            }
+        });
+    }
+}
+
+function broadcastInteraction(ws, msg) {
+    const room = rooms.get(ws.roomCode);
+    if (!room) return;
+    
+    const interactionMsg = JSON.stringify({
+        type: 'interaction',
+        objectId: msg.objectId,
+        action: msg.action,
+        data: msg.data,
+        playerId: ws.playerId
+    });
+    
+    if (ws.isHost) {
+        room.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(interactionMsg);
+            }
+        });
+    } else {
+        if (room.host.readyState === WebSocket.OPEN) {
+            room.host.send(interactionMsg);
+        }
+        room.clients.forEach(client => {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+                client.send(interactionMsg);
+            }
+        });
+    }
+}
+
 function leaveRoom(ws) {
     handleDisconnect(ws);
 }
 
 function handleDisconnect(ws) {
     if (!ws.roomCode) return;
-    
     const room = rooms.get(ws.roomCode);
     if (!room) return;
     
     if (ws.isHost) {
-        const closeMsg = JSON.stringify({
-            type: 'host_disconnected',
-            message: 'Host left'
-        });
-        
+        const closeMsg = JSON.stringify({ type: 'host_disconnected', message: 'Host left' });
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
                 client.send(closeMsg);
                 client.close();
             }
         });
-        
         rooms.delete(ws.roomCode);
-        console.log(`🚪 Room ${ws.roomCode} closed (host left)`);
     } else {
         const index = room.clients.indexOf(ws);
         if (index > -1) {
             room.clients.splice(index, 1);
             delete room.playerData[ws.playerId];
-            
-            const leftMsg = JSON.stringify({
-                type: 'player_left',
-                playerId: ws.playerId,
-                playerInfo: ws.playerInfo
-            });
-            
+            const leftMsg = JSON.stringify({ type: 'player_left', playerId: ws.playerId, playerInfo: ws.playerInfo });
             if (room.host.readyState === WebSocket.OPEN) {
                 room.host.send(leftMsg);
             }
-            
             room.clients.forEach(client => {
                 if (client.readyState === WebSocket.OPEN) {
                     client.send(leftMsg);
                 }
             });
-            
-            console.log(`👋 Player ${ws.playerInfo.nick} left room ${ws.roomCode}`);
-            console.log(`   Remaining players: ${room.clients.length + 1}`);
         }
     }
 }
 
-// HTTP Routes
 app.get('/', (req, res) => {
-    res.send(`
-        <html>
-        <head>
-            <title>Godot Server</title>
-            <style>
-                body { 
-                    font-family: Arial; 
-                    padding: 20px; 
-                    background: #1a1a1a; 
-                    color: #fff; 
-                }
-                .status { 
-                    background: #2a2a2a; 
-                    padding: 20px; 
-                    border-radius: 10px; 
-                }
-            </style>
-        </head>
-        <body>
-            <div class="status">
-                <h1>🎮 Godot Multiplayer Server</h1>
-                <h2>✅ Server Online</h2>
-                <p><strong>Active Rooms:</strong> ${rooms.size}</p>
-                <p><strong>Connected Clients:</strong> ${wss.clients.size}</p>
-                <p><strong>Max Players Per Room:</strong> 6</p>
-                <p><strong>WebSocket URL:</strong> wss://${req.get('host')}</p>
-            </div>
-        </body>
-        </html>
-    `);
+    res.send(`<html><head><title>Godot Server</title><style>body{font-family:Arial;padding:20px;background:#1a1a1a;color:#fff}.status{background:#2a2a2a;padding:20px;border-radius:10px}</style></head><body><div class="status"><h1>🎮 Godot Multiplayer Server</h1><h2>✅ Server Online</h2><p><strong>Active Rooms:</strong> ${rooms.size}</p><p><strong>Connected Clients:</strong> ${wss.clients.size}</p></div></body></html>`);
 });
 
-app.get('/stats', (req, res) => {
-    res.json({
-        status: 'online',
-        activeRooms: rooms.size,
-        connectedClients: wss.clients.size,
-        rooms: Array.from(rooms.entries()).map(([code, room]) => ({
-            code,
-            host: room.hostInfo.nick,
-            players: room.clients.length + 1,
-            maxPlayers: 6
-        }))
-    });
-});
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok' });
-});
-
-// Start server
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server running on port ${PORT}`);
-    console.log(`WebSocket: wss://your-domain:${PORT}`);
-    console.log(`Max players per room: 6`);
 });

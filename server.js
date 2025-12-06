@@ -37,6 +37,7 @@ function handleMessage(ws, msg) {
         case 'create_room': createRoom(ws, msg); break;
         case 'join_room': joinRoom(ws, msg); break;
         case 'player_position': broadcastPosition(ws, msg); break;
+        case 'player_animation': broadcastAnimation(ws, msg); break; // NEW
         case 'chat_message': broadcastChat(ws, msg); break;
         case 'environment_update': broadcastEnvironment(ws, msg); break;
         case 'puzzle_update': broadcastPuzzle(ws, msg); break;
@@ -67,7 +68,9 @@ function createRoom(ws, msg) {
         playerData: {
             host: {
                 info: msg.playerInfo,
-                position: { x: 0, y: 0, z: 0 }
+                position: { x: 0, y: 0, z: 0 },
+                animState: 0,        // NEW: Animation state
+                sprinting: false     // NEW: Sprint state
             }
         },
         environmentState: {},
@@ -87,6 +90,8 @@ function createRoom(ws, msg) {
         success: true,
         playerId: 'host'
     }));
+    
+    console.log(`✅ Room created: ${roomCode} by ${msg.playerInfo.nick}`);
 }
 
 function joinRoom(ws, msg) {
@@ -112,7 +117,9 @@ function joinRoom(ws, msg) {
     room.clients.push(ws);
     room.playerData[playerId] = {
         info: msg.playerInfo,
-        position: { x: 0, y: 0, z: 0 }
+        position: { x: 0, y: 0, z: 0 },
+        animState: 0,        // NEW: Animation state
+        sprinting: false     // NEW: Sprint state
     };
     
     ws.send(JSON.stringify({
@@ -151,12 +158,15 @@ function joinRoom(ws, msg) {
             client.send(newPlayerMsg);
         }
     });
+    
+    console.log(`➕ ${msg.playerInfo.nick} joined room ${roomCode} as ${playerId}`);
 }
 
 function broadcastPosition(ws, msg) {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
     
+    // Store position in room data
     if (room.playerData[ws.playerId]) {
         room.playerData[ws.playerId].position = msg.position;
     }
@@ -167,6 +177,7 @@ function broadcastPosition(ws, msg) {
         position: msg.position
     });
     
+    // Broadcast to all other players
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -185,6 +196,43 @@ function broadcastPosition(ws, msg) {
     }
 }
 
+// NEW FUNCTION: Broadcast animation state
+function broadcastAnimation(ws, msg) {
+    const room = rooms.get(ws.roomCode);
+    if (!room) return;
+    
+    // Store animation state in room data
+    if (room.playerData[ws.playerId]) {
+        room.playerData[ws.playerId].animState = msg.animState;
+        room.playerData[ws.playerId].sprinting = msg.sprinting;
+    }
+    
+    const animMsg = JSON.stringify({
+        type: 'player_animation',
+        playerId: ws.playerId,
+        animState: msg.animState,
+        sprinting: msg.sprinting
+    });
+    
+    // Broadcast to all other players (same logic as position)
+    if (ws.isHost) {
+        room.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(animMsg);
+            }
+        });
+    } else {
+        if (room.host.readyState === WebSocket.OPEN) {
+            room.host.send(animMsg);
+        }
+        room.clients.forEach(client => {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+                client.send(animMsg);
+            }
+        });
+    }
+}
+
 function broadcastChat(ws, msg) {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
@@ -196,8 +244,10 @@ function broadcastChat(ws, msg) {
         playerId: ws.playerId
     });
     
+    // Send to sender too (for confirmation)
     ws.send(chatMsg);
     
+    // Broadcast to all other players
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -218,7 +268,7 @@ function broadcastChat(ws, msg) {
 
 function broadcastEnvironment(ws, msg) {
     const room = rooms.get(ws.roomCode);
-    if (!room || !ws.isHost) return;
+    if (!room || !ws.isHost) return; // Only host can update environment
     
     room.environmentState = msg.data;
     
@@ -227,6 +277,7 @@ function broadcastEnvironment(ws, msg) {
         data: msg.data
     });
     
+    // Broadcast to all clients
     room.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(envMsg);
@@ -238,6 +289,7 @@ function broadcastPuzzle(ws, msg) {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
     
+    // Store puzzle state
     room.puzzleStates[msg.puzzleId] = msg.state;
     
     const puzzleMsg = JSON.stringify({
@@ -246,6 +298,7 @@ function broadcastPuzzle(ws, msg) {
         state: msg.state
     });
     
+    // Broadcast to all other players
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -276,6 +329,7 @@ function broadcastInteraction(ws, msg) {
         playerId: ws.playerId
     });
     
+    // Broadcast to all other players
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -304,6 +358,8 @@ function handleDisconnect(ws) {
     if (!room) return;
     
     if (ws.isHost) {
+        // Host disconnected - close entire room
+        console.log(`🚪 Host left room ${ws.roomCode}, closing room...`);
         const closeMsg = JSON.stringify({ type: 'host_disconnected', message: 'Host left' });
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -313,14 +369,26 @@ function handleDisconnect(ws) {
         });
         rooms.delete(ws.roomCode);
     } else {
+        // Client disconnected
         const index = room.clients.indexOf(ws);
         if (index > -1) {
             room.clients.splice(index, 1);
             delete room.playerData[ws.playerId];
-            const leftMsg = JSON.stringify({ type: 'player_left', playerId: ws.playerId, playerInfo: ws.playerInfo });
+            
+            console.log(`➖ ${ws.playerInfo?.nick || 'Unknown'} left room ${ws.roomCode}`);
+            
+            const leftMsg = JSON.stringify({ 
+                type: 'player_left', 
+                playerId: ws.playerId, 
+                playerInfo: ws.playerInfo 
+            });
+            
+            // Notify host
             if (room.host.readyState === WebSocket.OPEN) {
                 room.host.send(leftMsg);
             }
+            
+            // Notify other clients
             room.clients.forEach(client => {
                 if (client.readyState === WebSocket.OPEN) {
                     client.send(leftMsg);
@@ -330,12 +398,138 @@ function handleDisconnect(ws) {
     }
 }
 
+// HTTP Routes
 app.get('/', (req, res) => {
-    res.send(`<html><head><title>Godot Server</title><style>body{font-family:Arial;padding:20px;background:#1a1a1a;color:#fff}.status{background:#2a2a2a;padding:20px;border-radius:10px}</style></head><body><div class="status"><h1>🎮 Godot Multiplayer Server</h1><h2>✅ Server Online</h2><p><strong>Active Rooms:</strong> ${rooms.size}</p><p><strong>Connected Clients:</strong> ${wss.clients.size}</p></div></body></html>`);
+    const totalClients = wss.clients.size;
+    let roomDetails = '';
+    
+    rooms.forEach((room, code) => {
+        const playerCount = 1 + room.clients.length; // host + clients
+        roomDetails += `<div style="background:#333;padding:10px;margin:10px 0;border-radius:5px;">
+            <strong>Room: ${code}</strong> | 
+            Players: ${playerCount}/6 | 
+            Host: ${room.hostInfo?.nick || 'Unknown'}
+        </div>`;
+    });
+    
+    res.send(`
+        <html>
+        <head>
+            <title>Godot Multiplayer Server</title>
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    padding: 20px; 
+                    background: #1a1a1a; 
+                    color: #fff; 
+                }
+                .status { 
+                    background: #2a2a2a; 
+                    padding: 20px; 
+                    border-radius: 10px; 
+                    max-width: 800px; 
+                    margin: 0 auto;
+                }
+                .badge {
+                    background: #4CAF50;
+                    padding: 5px 10px;
+                    border-radius: 5px;
+                    display: inline-block;
+                    margin: 5px 0;
+                }
+                .metric {
+                    background: #333;
+                    padding: 15px;
+                    margin: 10px 0;
+                    border-radius: 5px;
+                    border-left: 4px solid #4CAF50;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="status">
+                <h1>🎮 Godot Multiplayer Server</h1>
+                <div class="badge">✅ Server Online</div>
+                
+                <div class="metric">
+                    <h3>📊 Server Statistics</h3>
+                    <p><strong>Active Rooms:</strong> ${rooms.size}</p>
+                    <p><strong>Connected Clients:</strong> ${totalClients}</p>
+                    <p><strong>Server Time:</strong> ${new Date().toLocaleString()}</p>
+                </div>
+                
+                <div class="metric">
+                    <h3>🎯 Supported Features</h3>
+                    <p>✅ Position Sync</p>
+                    <p>✅ Animation Sync</p>
+                    <p>✅ Chat System</p>
+                    <p>✅ Environment Updates (Day/Night)</p>
+                    <p>✅ Puzzle States</p>
+                    <p>✅ Interactions (Doors, Levers)</p>
+                </div>
+                
+                ${rooms.size > 0 ? `
+                <div class="metric">
+                    <h3>🏠 Active Rooms</h3>
+                    ${roomDetails}
+                </div>
+                ` : ''}
+            </div>
+        </body>
+        </html>
+    `);
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'ok',
+        rooms: rooms.size,
+        clients: wss.clients.size,
+        uptime: process.uptime(),
+        features: [
+            'position_sync',
+            'animation_sync',
+            'chat',
+            'environment',
+            'puzzles',
+            'interactions'
+        ]
+    });
+});
+
+// Stats endpoint for monitoring
+app.get('/stats', (req, res) => {
+    const roomStats = [];
+    rooms.forEach((room, code) => {
+        roomStats.push({
+            code: code,
+            host: room.hostInfo?.nick || 'Unknown',
+            players: 1 + room.clients.length,
+            created: new Date(room.createdAt).toLocaleString()
+        });
+    });
+    
+    res.json({
+        totalRooms: rooms.size,
+        totalClients: wss.clients.size,
+        rooms: roomStats
+    });
+});
 
 server.listen(PORT, '0.0.0.0', () => {
+    console.log('═══════════════════════════════════════');
+    console.log('🎮 Godot Multiplayer Server');
+    console.log('═══════════════════════════════════════');
     console.log(`✅ Server running on port ${PORT}`);
+    console.log(`📡 WebSocket endpoint: ws://localhost:${PORT}`);
+    console.log(`🌐 HTTP endpoint: http://localhost:${PORT}`);
+    console.log('═══════════════════════════════════════');
+    console.log('✨ Features enabled:');
+    console.log('   - Position sync');
+    console.log('   - Animation sync (NEW!)');
+    console.log('   - Chat system');
+    console.log('   - Environment updates');
+    console.log('   - Puzzle states');
+    console.log('   - Interactions');
+    console.log('═══════════════════════════════════════');
 });

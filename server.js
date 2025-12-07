@@ -37,11 +37,13 @@ function handleMessage(ws, msg) {
         case 'create_room': createRoom(ws, msg); break;
         case 'join_room': joinRoom(ws, msg); break;
         case 'player_position': broadcastPosition(ws, msg); break;
-        case 'player_animation': broadcastAnimation(ws, msg); break; // NEW
+        case 'player_animation': broadcastAnimation(ws, msg); break;
         case 'chat_message': broadcastChat(ws, msg); break;
         case 'environment_update': broadcastEnvironment(ws, msg); break;
         case 'puzzle_update': broadcastPuzzle(ws, msg); break;
         case 'interaction': broadcastInteraction(ws, msg); break;
+        case 'enemy_state': broadcastEnemyState(ws, msg); break;
+        case 'enemy_capture': broadcastEnemyCapture(ws, msg); break;
         case 'leave_room': leaveRoom(ws); break;
     }
 }
@@ -69,12 +71,13 @@ function createRoom(ws, msg) {
             host: {
                 info: msg.playerInfo,
                 position: { x: 0, y: 0, z: 0 },
-                animState: 0,        // NEW: Animation state
-                sprinting: false     // NEW: Sprint state
+                animState: 0,
+                sprinting: false
             }
         },
         environmentState: {},
         puzzleStates: {},
+        enemyStates: {},
         createdAt: Date.now()
     };
     
@@ -118,8 +121,8 @@ function joinRoom(ws, msg) {
     room.playerData[playerId] = {
         info: msg.playerInfo,
         position: { x: 0, y: 0, z: 0 },
-        animState: 0,        // NEW: Animation state
-        sprinting: false     // NEW: Sprint state
+        animState: 0,
+        sprinting: false
     };
     
     ws.send(JSON.stringify({
@@ -146,6 +149,14 @@ function joinRoom(ws, msg) {
         }));
     }
     
+    // Send all enemy states
+    for (const [enemyId, state] of Object.entries(room.enemyStates)) {
+        ws.send(JSON.stringify({
+            type: 'enemy_state',
+            data: state
+        }));
+    }
+    
     const newPlayerMsg = JSON.stringify({
         type: 'player_joined',
         playerId: playerId,
@@ -166,7 +177,6 @@ function broadcastPosition(ws, msg) {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
     
-    // Store position in room data
     if (room.playerData[ws.playerId]) {
         room.playerData[ws.playerId].position = msg.position;
     }
@@ -177,7 +187,6 @@ function broadcastPosition(ws, msg) {
         position: msg.position
     });
     
-    // Broadcast to all other players
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -196,12 +205,10 @@ function broadcastPosition(ws, msg) {
     }
 }
 
-// NEW FUNCTION: Broadcast animation state
 function broadcastAnimation(ws, msg) {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
     
-    // Store animation state in room data
     if (room.playerData[ws.playerId]) {
         room.playerData[ws.playerId].animState = msg.animState;
         room.playerData[ws.playerId].sprinting = msg.sprinting;
@@ -214,7 +221,6 @@ function broadcastAnimation(ws, msg) {
         sprinting: msg.sprinting
     });
     
-    // Broadcast to all other players (same logic as position)
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -244,10 +250,8 @@ function broadcastChat(ws, msg) {
         playerId: ws.playerId
     });
     
-    // Send to sender too (for confirmation)
     ws.send(chatMsg);
     
-    // Broadcast to all other players
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -268,7 +272,7 @@ function broadcastChat(ws, msg) {
 
 function broadcastEnvironment(ws, msg) {
     const room = rooms.get(ws.roomCode);
-    if (!room || !ws.isHost) return; // Only host can update environment
+    if (!room || !ws.isHost) return;
     
     room.environmentState = msg.data;
     
@@ -277,7 +281,6 @@ function broadcastEnvironment(ws, msg) {
         data: msg.data
     });
     
-    // Broadcast to all clients
     room.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(envMsg);
@@ -289,7 +292,6 @@ function broadcastPuzzle(ws, msg) {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
     
-    // Store puzzle state
     room.puzzleStates[msg.puzzleId] = msg.state;
     
     const puzzleMsg = JSON.stringify({
@@ -298,7 +300,6 @@ function broadcastPuzzle(ws, msg) {
         state: msg.state
     });
     
-    // Broadcast to all other players
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -329,7 +330,6 @@ function broadcastInteraction(ws, msg) {
         playerId: ws.playerId
     });
     
-    // Broadcast to all other players
     if (ws.isHost) {
         room.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -348,6 +348,46 @@ function broadcastInteraction(ws, msg) {
     }
 }
 
+// NEW: Broadcast enemy state
+function broadcastEnemyState(ws, msg) {
+    const room = rooms.get(ws.roomCode);
+    if (!room || !ws.isHost) return; // Only host can send enemy updates
+    
+    const enemyData = msg.data;
+    room.enemyStates[enemyData.enemy_id] = enemyData;
+    
+    const enemyMsg = JSON.stringify({
+        type: 'enemy_state',
+        data: enemyData
+    });
+    
+    // Broadcast to all clients
+    room.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(enemyMsg);
+        }
+    });
+}
+
+// NEW: Broadcast enemy capture
+function broadcastEnemyCapture(ws, msg) {
+    const room = rooms.get(ws.roomCode);
+    if (!room || !ws.isHost) return;
+    
+    const captureMsg = JSON.stringify({
+        type: 'enemy_capture',
+        enemy_id: msg.enemy_id,
+        player_id: msg.player_id
+    });
+    
+    // Broadcast to all clients
+    room.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(captureMsg);
+        }
+    });
+}
+
 function leaveRoom(ws) {
     handleDisconnect(ws);
 }
@@ -358,7 +398,6 @@ function handleDisconnect(ws) {
     if (!room) return;
     
     if (ws.isHost) {
-        // Host disconnected - close entire room
         console.log(`🚪 Host left room ${ws.roomCode}, closing room...`);
         const closeMsg = JSON.stringify({ type: 'host_disconnected', message: 'Host left' });
         room.clients.forEach(client => {
@@ -369,7 +408,6 @@ function handleDisconnect(ws) {
         });
         rooms.delete(ws.roomCode);
     } else {
-        // Client disconnected
         const index = room.clients.indexOf(ws);
         if (index > -1) {
             room.clients.splice(index, 1);
@@ -383,12 +421,10 @@ function handleDisconnect(ws) {
                 playerInfo: ws.playerInfo 
             });
             
-            // Notify host
             if (room.host.readyState === WebSocket.OPEN) {
                 room.host.send(leftMsg);
             }
             
-            // Notify other clients
             room.clients.forEach(client => {
                 if (client.readyState === WebSocket.OPEN) {
                     client.send(leftMsg);
@@ -404,10 +440,12 @@ app.get('/', (req, res) => {
     let roomDetails = '';
     
     rooms.forEach((room, code) => {
-        const playerCount = 1 + room.clients.length; // host + clients
+        const playerCount = 1 + room.clients.length;
+        const enemyCount = Object.keys(room.enemyStates).length;
         roomDetails += `<div style="background:#333;padding:10px;margin:10px 0;border-radius:5px;">
             <strong>Room: ${code}</strong> | 
             Players: ${playerCount}/6 | 
+            Enemies: ${enemyCount} |
             Host: ${room.hostInfo?.nick || 'Unknown'}
         </div>`;
     });
@@ -466,6 +504,7 @@ app.get('/', (req, res) => {
                     <p>✅ Environment Updates (Day/Night)</p>
                     <p>✅ Puzzle States</p>
                     <p>✅ Interactions (Doors, Levers)</p>
+                    <p>✅ Enemy AI Sync (NEW!)</p>
                 </div>
                 
                 ${rooms.size > 0 ? `
@@ -492,12 +531,12 @@ app.get('/health', (req, res) => {
             'chat',
             'environment',
             'puzzles',
-            'interactions'
+            'interactions',
+            'enemy_ai'
         ]
     });
 });
 
-// Stats endpoint for monitoring
 app.get('/stats', (req, res) => {
     const roomStats = [];
     rooms.forEach((room, code) => {
@@ -505,6 +544,7 @@ app.get('/stats', (req, res) => {
             code: code,
             host: room.hostInfo?.nick || 'Unknown',
             players: 1 + room.clients.length,
+            enemies: Object.keys(room.enemyStates).length,
             created: new Date(room.createdAt).toLocaleString()
         });
     });
@@ -526,10 +566,11 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('═══════════════════════════════════════');
     console.log('✨ Features enabled:');
     console.log('   - Position sync');
-    console.log('   - Animation sync (NEW!)');
+    console.log('   - Animation sync');
     console.log('   - Chat system');
     console.log('   - Environment updates');
     console.log('   - Puzzle states');
     console.log('   - Interactions');
+    console.log('   - Enemy AI sync (NEW!)');
     console.log('═══════════════════════════════════════');
 });
